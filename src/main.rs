@@ -11,12 +11,12 @@ use tokio_tungstenite::tungstenite::{
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::env;
-use base64::{Engine as _, engine::general_purpose};
 use std::sync::{Arc, Mutex};
+use base64::{Engine as _, engine::general_purpose};
 
 const MAX_PAYLOAD: usize = 512 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30); // Tăng timeout
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 enum CloseReason {
@@ -60,10 +60,8 @@ fn extract_backend_from_path(path: &str) -> Result<String, String> {
         return Err("Empty path".to_string());
     }
     
-    // Remove query string if present
     let path = path.split('?').next().unwrap_or(path);
     
-    // Validate base64 characters
     if !path.chars().all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '=') {
         return Err("Invalid base64 characters".to_string());
     }
@@ -75,6 +73,7 @@ fn extract_backend_from_path(path: &str) -> Result<String, String> {
                     if let Some(colon_pos) = addr.rfind(':') {
                         let host = &addr[..colon_pos];
                         let port_str = &addr[colon_pos + 1..];
+                        
                         if let Ok(port) = port_str.parse::<u16>() {
                             if port > 0 && !host.is_empty() {
                                 Ok(addr)
@@ -95,11 +94,12 @@ fn extract_backend_from_path(path: &str) -> Result<String, String> {
     }
 }
 
+// FIXED: all branches return Response<Option<String>>
 fn handshake_callback(
     req: &Request, 
     backend_addr: &Arc<Mutex<Option<String>>>,
     instance_id: &str
-) -> Result<Response, Response> {
+) -> Result<Response<()>, Response<Option<String>>> {
     let path = req.uri().path();
     let client_ip = req.headers()
         .get("x-forwarded-for")
@@ -120,10 +120,11 @@ fn handshake_callback(
         Ok(addr) => {
             *backend_addr.lock().unwrap() = Some(addr.clone());
             println!("[{}][HANDSHAKE] ✓ Backend: {}", instance_id, addr);
+            
             let response = Response::builder()
                 .status(StatusCode::SWITCHING_PROTOCOLS)
                 .header("Server", "ws-tcp-proxy")
-                .body(None)
+                .body(())
                 .map_err(|e| {
                     println!("[{}][HANDSHAKE] ✗ Response build error: {}", instance_id, e);
                     Response::builder()
@@ -131,6 +132,7 @@ fn handshake_callback(
                         .body(Some("Internal server error".to_string()))
                         .unwrap()
                 })?;
+                
             Ok(response)
         }
         Err(error) => {
@@ -160,7 +162,7 @@ async fn handle_connection(
     println!("[{}][CONNECTION] New connection from {}", instance_id, client_addr.ip());
 
     let ws_stream = match timeout(HANDSHAKE_TIMEOUT, async {
-        tokio_tungstenite::accept_hdr_async(stream, |req: &Request, res: Response| {
+        tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, _res: Response| {
             handshake_callback(req, &backend_addr_clone, &instance_clone)
         }).await
     }).await {
@@ -206,7 +208,7 @@ async fn handle_connection(
             return Err("TCP connection timeout".into());
         }
     };
-
+    
     if let Err(e) = tcp_stream.set_nodelay(true) {
         println!("[{}][TCP] Warning: Failed to set nodelay: {}", instance_id, e);
     }
@@ -223,27 +225,29 @@ async fn handle_connection(
                         let should_close = match msg {
                             Message::Text(text) => tcp_write.write_all(text.as_bytes()).await.is_err(),
                             Message::Binary(data) => tcp_write.write_all(&data).await.is_err(),
-                            Message::Close(frame) => { println!("[{}][PROXY] WS Close: {:?}", instance_id, frame); true },
-                            Message::Ping(data) => ws_write.send(Message::Pong(data)).await.is_err(),
+                            Message::Close(_) => true,
+                            Message::Ping(data) => {
+                                let _ = ws_write.send(Message::Pong(data)).await;
+                                false
+                            }
                             Message::Pong(_) => false,
                             _ => false,
                         };
                         if should_close { break CloseReason::WsToTcp; }
                     }
-                    Ok(Some(Err(e))) => { println!("[{}][PROXY] WS error: {}", instance_id, e); break CloseReason::WsToTcp; }
-                    Ok(None) => { println!("[{}][PROXY] WS ended", instance_id); break CloseReason::WsToTcp; }
-                    Err(_) => { println!("[{}][PROXY] WS timeout", instance_id); break CloseReason::WsToTcp; }
+                    _ => break CloseReason::WsToTcp,
                 }
             }
             read_result = timeout(CONNECTION_TIMEOUT, tcp_read.read(&mut buffer)) => {
                 match read_result {
-                    Ok(Ok(0)) => { println!("[{}][PROXY] TCP EOF", instance_id); break CloseReason::TcpToWs; }
+                    Ok(Ok(0)) => break CloseReason::TcpToWs,
                     Ok(Ok(n)) => {
                         let text = String::from_utf8_lossy(&buffer[..n]).to_string();
-                        if ws_write.send(Message::Text(text)).await.is_err() { break CloseReason::TcpToWs; }
+                        if ws_write.send(Message::Text(text)).await.is_err() {
+                            break CloseReason::TcpToWs;
+                        }
                     }
-                    Ok(Err(e)) => { println!("[{}][PROXY] TCP read error: {}", instance_id, e); break CloseReason::TcpToWs; }
-                    Err(_) => { println!("[{}][PROXY] TCP timeout", instance_id); break CloseReason::TcpToWs; }
+                    _ => break CloseReason::TcpToWs,
                 }
             }
         }
