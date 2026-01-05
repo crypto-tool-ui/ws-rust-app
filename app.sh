@@ -6,6 +6,7 @@ PORT=${2:-3000}
 TCP_HOST=${3:-127.0.0.1}
 TCP_PORT=${4:-3333}
 
+export INSTANCE_ID=${ID}
 export WS_PORT=${PORT}
 export BACKEND_HOST=${TCP_HOST}
 export BACKEND_PORT=${TCP_PORT}
