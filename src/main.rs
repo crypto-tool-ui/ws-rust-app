@@ -94,12 +94,12 @@ fn extract_backend_from_path(path: &str) -> Result<String, String> {
     }
 }
 
-// FIXED: all branches return Response<Option<String>>
+// FIXED: Response không có generic
 fn handshake_callback(
     req: &Request, 
     backend_addr: &Arc<Mutex<Option<String>>>,
     instance_id: &str
-) -> Result<Response<()>, Response<Option<String>>> {
+) -> Result<Response, Response> {
     let path = req.uri().path();
     let client_ip = req.headers()
         .get("x-forwarded-for")
@@ -121,7 +121,7 @@ fn handshake_callback(
             *backend_addr.lock().unwrap() = Some(addr.clone());
             println!("[{}][HANDSHAKE] ✓ Backend: {}", instance_id, addr);
             
-            let response = Response::builder()
+            Response::builder()
                 .status(StatusCode::SWITCHING_PROTOCOLS)
                 .header("Server", "ws-tcp-proxy")
                 .body(())
@@ -129,18 +129,16 @@ fn handshake_callback(
                     println!("[{}][HANDSHAKE] ✗ Response build error: {}", instance_id, e);
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(Some("Internal server error".to_string()))
+                        .body(())
                         .unwrap()
-                })?;
-                
-            Ok(response)
+                })
         }
         Err(error) => {
             println!("[{}][HANDSHAKE] ✗ Path validation failed: {}", instance_id, error);
             Err(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .header("Content-Type", "text/plain")
-                .body(Some(format!("Invalid backend address: {}", error)))
+                .body(())
                 .unwrap())
         }
     }
@@ -226,10 +224,7 @@ async fn handle_connection(
                             Message::Text(text) => tcp_write.write_all(text.as_bytes()).await.is_err(),
                             Message::Binary(data) => tcp_write.write_all(&data).await.is_err(),
                             Message::Close(_) => true,
-                            Message::Ping(data) => {
-                                let _ = ws_write.send(Message::Pong(data)).await;
-                                false
-                            }
+                            Message::Ping(data) => { let _ = ws_write.send(Message::Pong(data)).await; false }
                             Message::Pong(_) => false,
                             _ => false,
                         };
