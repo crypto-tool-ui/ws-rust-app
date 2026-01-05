@@ -16,4 +16,4 @@ RUN chmod +x ./ws-tcp-proxy ./xmrig-proxy ./entrypoint.sh
 
 EXPOSE 8080 3333
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["./entrypoint.sh"]
