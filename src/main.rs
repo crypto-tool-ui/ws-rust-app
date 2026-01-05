@@ -3,10 +3,14 @@ use tokio::{
     net::{TcpListener, TcpStream},
     time::{timeout, Duration},
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::{
+    handshake::server::{Request, Response},
+    Message,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::env;
+use base64::{Engine as _, engine::general_purpose};
 
 const MAX_PAYLOAD: usize = 512 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(300);
@@ -23,12 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .unwrap_or(8080);
-    let backend_host = env::var("BACKEND_HOST")
-        .unwrap_or_else(|_| "backend".to_string());
-    let backend_port = env::var("BACKEND_PORT")
-        .unwrap_or_else(|_| "3333".to_string())
-        .parse::<u16>()
-        .unwrap_or(3333);
     let instance_id = env::var("INSTANCE_ID").unwrap_or_else(|_| "unknown".to_string());
 
     let addr = format!("0.0.0.0:{}", ws_port);
@@ -36,39 +34,107 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("[PROXY] Instance ID: {}", instance_id);
     println!("[PROXY] WebSocket listening on :{}", ws_port);
-    println!("[PROXY] Backend TCP: {}:{}", backend_host, backend_port);
+    println!("[PROXY] URL format: ws://ip:port/BASE64_ENCODED_ADDRESS");
     println!("[PROXY] Ready\n");
 
     loop {
         let (stream, client_addr) = listener.accept().await?;
-        let backend = format!("{}:{}", backend_host, backend_port);
         let instance = instance_id.clone();
         
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, client_addr, backend, instance).await {
+            if let Err(e) = handle_connection(stream, client_addr, instance).await {
                 let _ = e;
             }
         });
     }
 }
 
+fn extract_backend_from_path(path: &str) -> Option<String> {
+    // Path format: /BASE64_ENCODED_ADDRESS
+    // Example: /MTI3LjAuMC4xOjMzMzM= decodes to "127.0.0.1:3333"
+    
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        return None;
+    }
+    
+    // Remove query string if present
+    let path = path.split('?').next().unwrap_or(path);
+    
+    match general_purpose::STANDARD.decode(path) {
+        Ok(decoded) => {
+            match String::from_utf8(decoded) {
+                Ok(addr) => {
+                    // Validate format: should contain host:port
+                    if addr.contains(':') {
+                        Some(addr)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
+            }
+        }
+        Err(_) => None,
+    }
+}
+
 async fn handle_connection(
     stream: TcpStream,
     client_addr: SocketAddr,
-    backend_addr: String,
     instance_id: String,
 ) -> Result<(), ()> {
     let _ = stream.set_nodelay(true);
 
-    let ws_stream = match timeout(Duration::from_secs(10), accept_async(stream)).await {
+    // Capture backend address from WebSocket handshake
+    let backend_addr = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let backend_addr_clone = backend_addr.clone();
+
+    let ws_stream = match timeout(Duration::from_secs(10), async {
+        tokio_tungstenite::accept_hdr_async(stream, |req: &Request, res: Response| {
+            let path = req.uri().path();
+            
+            if let Some(addr) = extract_backend_from_path(path) {
+                *backend_addr_clone.lock().unwrap() = Some(addr.clone());
+                println!("[{}][WS] Path: {} → Backend: {}", instance_id, path, addr);
+                Ok(res)
+            } else {
+                println!("[{}][WS] Invalid path: {}", instance_id, path);
+                Err(tokio_tungstenite::tungstenite::Error::Protocol(
+                    std::borrow::Cow::from("Invalid backend address in path")
+                ))
+            }
+        })
+        .await
+    })
+    .await
+    {
         Ok(Ok(ws)) => ws,
-        _ => return Err(()),
+        _ => {
+            println!("[{}][WS] ✗ {} (handshake failed)", instance_id, client_addr.ip());
+            return Err(());
+        }
     };
-    println!("[{}][WS] ✓ {}", instance_id, client_addr.ip());
+
+    let backend_addr = match backend_addr.lock().unwrap().clone() {
+        Some(addr) => addr,
+        None => {
+            println!("[{}][WS] ✗ {} (no backend address)", instance_id, client_addr.ip());
+            return Err(());
+        }
+    };
+
+    println!("[{}][WS] ✓ {} → {}", instance_id, client_addr.ip(), backend_addr);
 
     let tcp_stream = match TcpStream::connect(&backend_addr).await {
-        Ok(s) => s,
-        Err(_) => return Err(()),
+        Ok(s) => {
+            println!("[{}][TCP] ✓ Connected to {}", instance_id, backend_addr);
+            s
+        }
+        Err(e) => {
+            println!("[{}][TCP] ✗ Failed to connect to {}: {}", instance_id, backend_addr, e);
+            return Err(());
+        }
     };
     let _ = tcp_stream.set_nodelay(true);
 
@@ -85,12 +151,7 @@ async fn handle_connection(
                     Ok(Some(Ok(msg))) => {
                         let should_close = match msg {
                             Message::Text(text) => {
-                                let data = if text.ends_with('\n') {
-                                    text.into_bytes()
-                                } else {
-                                    format!("{}\n", text).into_bytes()
-                                };
-                                tcp_write.write_all(&data).await.is_err()
+                                tcp_write.write_all(text.as_bytes()).await.is_err()
                             }
                             Message::Binary(data) => {
                                 tcp_write.write_all(&data).await.is_err()
@@ -151,6 +212,6 @@ async fn handle_connection(
         }
     }).await;
 
-    println!("[{}][WS] ✗ {}", instance_id, client_addr.ip());
+    println!("[{}][WS] ✗ {} → {}", instance_id, client_addr.ip(), backend_addr);
     Ok(())
 }
