@@ -1,12 +1,19 @@
-# Dockerfile
-FROM rust:1.75 as builder
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-RUN cargo build --release
+FROM ubuntu:22.04
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/ws-tcp-proxy /usr/local/bin/
-EXPOSE 8080
-CMD ["ws-tcp-proxy"]
+RUN apt update && apt install -y \
+    ca-certificates \
+    curl \
+    bash \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY ws-tcp-proxy .
+COPY xmrig-proxy .
+COPY entrypoint.sh .
+
+RUN chmod +x ./ws-tcp-proxy ./xmrig-proxy ./entrypoint.sh
+
+EXPOSE 8080 3333
+
+ENTRYPOINT ["/entrypoint.sh"]
