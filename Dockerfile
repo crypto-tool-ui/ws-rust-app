@@ -8,6 +8,7 @@ RUN apt update && apt install -y \
 
 WORKDIR /app
 
+COPY config.json .
 COPY ws-tcp-proxy .
 COPY xmrig-proxy .
 COPY entrypoint.sh .
