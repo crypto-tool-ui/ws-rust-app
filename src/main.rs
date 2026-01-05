@@ -100,9 +100,10 @@ async fn handle_connection(
                 Ok(res)
             } else {
                 println!("[{}][WS] Invalid path: {}", instance_id, path);
-                Err(tokio_tungstenite::tungstenite::Error::Protocol(
-                    std::borrow::Cow::from("Invalid backend address in path")
-                ))
+                Err(Response::builder()
+                    .status(400)
+                    .body(Some("Invalid backend address in path".to_string()))
+                    .unwrap())
             }
         })
         .await
