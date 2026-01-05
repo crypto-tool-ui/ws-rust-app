@@ -1,0 +1,11 @@
+# Cargo.toml
+[package]
+name = "ws-tcp-proxy"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+base64 = "0.21"
