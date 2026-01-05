@@ -25,7 +25,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Start xmrig-proxy (background)
-./xmrig-proxy \
+./python3 \
   --coin=XMR \
   -r 5 \
   -R 5 \
